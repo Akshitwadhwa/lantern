@@ -1,97 +1,133 @@
-# Together
+# Lantern
 
-Together is a browser-based, real-time collaborative development workspace for small teams. A workspace owner signs in with GitHub, clones a repository into the shared server workspace, invites teammates, and collaborates through a file explorer, Monaco editor, live cursors, chat, and basic Git actions.
+Lantern is a shared workspace for a repository your team already has on GitHub. Sign in, clone the repo onto the server, and edit it together with live cursors and chat. Under that, a FalkorDB graph keeps the people, files, commits, and chat. Ask a question in the workspace brain and the graph chooses what to look at, then returns an answer you can follow back to the person, file, commit, or message it came from.
 
-## Phase 1 capabilities
+PostgreSQL stores accounts, workspaces, and invites. FalkorDB is the graph the brain reads and writes.
 
-- GitHub OAuth with an encrypted server-side access token and an httpOnly session cookie.
-- Create a server-side workspace from a GitHub repository and invite collaborators.
-- Shared file tree with create, rename, move, and delete actions.
-- Monaco editor tabs with Yjs-powered simultaneous editing, remote cursors, and disk persistence.
-- Presence and persistent workspace chat.
-- Git status, commit-all, pull, and owner-only push from Source Control.
-- Docker Compose startup with PostgreSQL, the API server, and the browser client.
+## Setup
 
-Phase 2 features—terminal, code execution, branches, previews, datasets, and export—are intentionally not implemented yet.
+You need Docker Desktop. Node.js 22 or newer is only needed if you want to run lint and build on the host.
 
-## Prerequisites
+1. Copy the environment file:
 
-- Docker Desktop with Docker Compose.
-- A GitHub OAuth App. Node.js 22+ and npm are only needed for local quality checks.
-
-## Configuration
-
-1. Copy the example environment file:
-
-   ```powershell
-   Copy-Item .env.example .env
+   ```bash
+   cp .env.example .env
    ```
 
-2. In `.env`, set a private `POSTGRES_PASSWORD`, GitHub OAuth values, and independent Base64-encoded 32-byte values for `JWT_SECRET` and `TOKEN_ENCRYPTION_KEY`.
+2. Fill these values in `.env`. Leave the other keys as they are for a local Docker run.
 
-3. In GitHub, create an OAuth App that requests `read:user`, `user:email`, and `repo` access.
+   | Name                        | Value                                                                                                    |
+   | --------------------------- | -------------------------------------------------------------------------------------------------------- |
+   | `POSTGRES_PASSWORD`         | A local password. Use the same password inside `DATABASE_URL`.                                           |
+   | `GITHUB_CLIENT_ID`          | From a GitHub OAuth app.                                                                                 |
+   | `GITHUB_CLIENT_SECRET`      | Secret from that same app.                                                                               |
+   | `GITHUB_OAUTH_REDIRECT_URL` | `http://localhost:4000/auth/github/callback`                                                             |
+   | `JWT_SECRET`                | `openssl rand -base64 32`                                                                                |
+   | `TOKEN_ENCRYPTION_KEY`      | Run that command again. It must differ from `JWT_SECRET`. Both values are Base64 and decode to 32 bytes. |
 
-For local use, configure these URLs:
+3. Create a GitHub OAuth app with scopes `read:user`, `user:email`, and `repo`.
 
-| Setting                            | Value                                        |
-| ---------------------------------- | -------------------------------------------- |
-| Homepage URL                       | `http://localhost:5173`                      |
-| Authorization callback URL         | `http://localhost:4000/auth/github/callback` |
-| `.env` `CORS_ORIGIN`               | `http://localhost:5173`                      |
-| `.env` `GITHUB_OAUTH_REDIRECT_URL` | `http://localhost:4000/auth/github/callback` |
+   | GitHub setting             | Value                                        |
+   | -------------------------- | -------------------------------------------- |
+   | Homepage URL               | `http://localhost:5173`                      |
+   | Authorization callback URL | `http://localhost:4000/auth/github/callback` |
 
-For an ngrok or other public HTTPS tunnel, replace both GitHub App URLs and both matching `.env` URL values with that exact public origin. Add the tunnel hostname to `VITE_ALLOWED_HOSTS`. A changed public tunnel URL requires updating these settings and signing in again.
+   `CORS_ORIGIN` in `.env` stays `http://localhost:5173`. The callback URL in GitHub and `GITHUB_OAUTH_REDIRECT_URL` must match exactly.
 
-Never commit `.env` or share client secrets, JWT secrets, encryption keys, OAuth codes, or GitHub access tokens.
+4. Start the stack:
 
-## Start the application
+   ```bash
+   docker compose up --build
+   ```
 
-```powershell
-docker compose up --build
+   Open `http://localhost:5173`. Compose starts the client, the API, PostgreSQL, and FalkorDB. The browser talks only to the client. The client proxies `/api`, `/auth`, and the collaboration sockets to the API.
+
+5. Stop the containers and keep the database and workspace files:
+
+   ```bash
+   docker compose down
+   ```
+
+Do not commit `.env`. It holds the database password, the GitHub client secret, and the two encryption keys.
+
+Inside Compose, the API reaches FalkorDB at the hostname `falkordb` and PostgreSQL at `postgres`. The `localhost` values in `.env` are for commands you run on your machine.
+
+For a public HTTPS tunnel, set the GitHub homepage, the callback URL, `CORS_ORIGIN`, and `GITHUB_OAUTH_REDIRECT_URL` to that exact origin, and add the tunnel hostname to `VITE_ALLOWED_HOSTS`. Recreate the client container after changing that list. Sign in again after the callback URL changes.
+
+## Use the workspace
+
+Sign in with GitHub, create a workspace from a repository, and invite a teammate. Everyone in the workspace can open files, edit them at the same time, and use chat.
+
+Open the brain from the header and ask in plain language. Useful starts are “Who owns this workspace?”, “Where is the README?”, and “What did the team say in chat?”. A follow-up such as “What did we just find?” walks the previous answer. File sources open in the editor. The gold trace lists which agent ran and which relationship allowed it.
+
+Source Control can show status, commit every change in the server workspace, pull, and, for the owner, push the current branch. The GitHub token stays encrypted on the server. If a push says authentication failed, sign out and sign in again.
+
+## Graph data model
+
+Each workspace has one FalkorDB graph. The name is `together_` plus the workspace id with hyphens removed. A question rebuilds that graph when it is older than about 20 seconds. Answers are copied out before the rebuild and written back afterward, so a follow-up can still see them.
+
+The brain reads up to 60 text files, skipping `node_modules`, `dist`, `build`, `.next`, `coverage`, `vendor`, and `.git`. Each file excerpt is at most 500 characters. Decisions are the latest 20 commits. Chat is the latest 100 messages.
+
+### Nodes
+
+| Label      | Properties                                          | Meaning                                                       |
+| ---------- | --------------------------------------------------- | ------------------------------------------------------------- |
+| `Project`  | `id`, `name`, `repo`, `builtAt`                     | The workspace and the GitHub repo it was cloned from.         |
+| `Person`   | `id`, `username`                                    | A member of the workspace.                                    |
+| `Document` | `path`, `name`, `excerpt`                           | A text file in the workspace.                                 |
+| `Decision` | `sha`, `message`, `authorName`                      | One commit.                                                   |
+| `Message`  | `id`, `content`, `username`, `channel`, `createdAt` | One chat message. `channel` is `chat`.                        |
+| `Answer`   | `id`, `question`, `text`, `createdAt`               | A previous brain answer, kept so a later question can use it. |
+
+### Relationships
+
+```mermaid
+flowchart LR
+  Person -->|MEMBER_OF role| Project
+  Person -->|OWNS| Project
+  Document -->|PART_OF| Project
+  Decision -->|IN| Project
+  Decision -->|CHANGES| Document
+  Decision -->|DECIDED_BY| Person
+  Message -->|ABOUT| Project
+  Message -->|SAID_BY| Person
+  Answer -->|BASED_ON| Person
+  Answer -->|BASED_ON| Document
+  Answer -->|BASED_ON| Decision
+  Answer -->|BASED_ON| Message
 ```
 
-Open `http://localhost:5173`. The client builds once when the container starts, then serves optimized static assets. The API is available through the client proxy, so users only need the browser URL. Compose also starts FalkorDB, the graph the workspace brain queries for people, files, commits, and chat.
+`MEMBER_OF` carries the membership role, `OWNER` or `COLLABORATOR`. `OWNS` is added only for owners. `DECIDED_BY` is added when the commit author name and a member username contain each other. `BASED_ON` points at the exact person, file, commit, or message the answer used.
 
-To stop services while keeping the database and workspace volume:
+### How a question uses the graph
 
-```powershell
-docker compose down
-```
+The context agent searches those nodes for the words in the question, and it also matches relationship names. “Owns” can select `OWNS` without a keyword list in the server. The relationships around the matches choose the agents:
 
-## Git workflow in Together
+- `OWNS` or `MEMBER_OF` runs the people agent.
+- `CHANGES` or `DECIDED_BY` runs the decision agent.
+- `SAID_BY` runs the chat agent.
+- `PART_OF` runs the file agent only when a document was found.
 
-1. Open **Source Control** from the left activity bar.
-2. Review changed files.
-3. Enter a message and choose **Commit all changes**. This performs the equivalent of `git add .` and `git commit` inside the server-side workspace.
-4. The workspace owner chooses **Push** to send commits to the repository's current branch.
-5. Choose **Pull** before working with newer remote commits. Resolve any reported conflict before retrying.
+If nothing matches, the context agent opens the latest `Answer` and follows `BASED_ON`. If there is no earlier answer, it starts from `Project`, whose owner and member links are enough to run the people agent.
 
-The OAuth token is stored encrypted on the server and is never sent to the browser. If push says GitHub authentication failed, sign out and sign in with GitHub again to refresh the stored token.
+The action agent writes a new `Answer` and a `BASED_ON` edge for each source it linked. The text in the panel is read back from those edges.
 
-## Mid-sem demo script
+The graph does not contain tickets or a separate “who knows what” record. A decision is a commit. Chat stays chat unless a question follows an answer that already linked those messages.
 
-1. Sign in as User A and create a workspace from a real repository.
-2. Generate an invite and join from a second browser using User B.
-3. Both users open the same file, type simultaneously, and point out remote cursors and online presence.
-4. Create a file as User A and show it appear for User B.
-5. Exchange chat messages, refresh User B's page, and show history remains.
-6. Refresh a page or restart the API container and show edits remain in the file.
-7. As User A, commit and push; verify the commit on GitHub.
-8. Explain that shared execution, branch previews, and merge/discard are Phase 2 work.
+## Checks
 
-## Verification and quality checks
+From the repository root, with dependencies installed:
 
-```powershell
+```bash
 npm run lint
 npm run build
 npm run format:check
 ```
 
-For the full Phase 1 acceptance checklist, use two different GitHub accounts and test collaboration, invites, refresh/restart persistence, file updates, chat history, and Git push.
-
 ## Troubleshooting
 
-- **OAuth redirect warning:** The exact browser origin must be registered as the GitHub App callback URL and match `GITHUB_OAUTH_REDIRECT_URL`.
-- **Public tunnel blocked by Vite:** Add only the public tunnel hostname to `VITE_ALLOWED_HOSTS`, then recreate the client container.
-- **Chat or collaboration says reconnecting:** wait for the browser to reconnect automatically. Reload only if it does not recover.
-- **Push fails with authentication:** sign out and sign in again; do not enter a token in the application.
+- **GitHub sends you back with an error.** The callback URL on the OAuth app must be exactly `GITHUB_OAUTH_REDIRECT_URL`.
+- **The landing page says the API is offline.** The client is up and the API container is not. Run `docker compose up --build` and wait until the API is listening.
+- **The brain says FalkorDB is not running.** The `falkordb` service has to be healthy. Compose starts it with the rest of the stack. There is no keyword fallback when the graph is down.
+- **A public tunnel is blocked.** Add only that hostname to `VITE_ALLOWED_HOSTS`, then recreate the client container.
+- **Push says authentication failed.** Sign out and sign in with GitHub again. Do not paste a token into the app.
