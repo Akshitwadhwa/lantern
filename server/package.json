@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "node ../scripts/with-env.mjs tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "lint": "eslint src prisma --max-warnings=0",
     "prisma:generate": "prisma generate --schema prisma/schema.prisma",
-    "prisma:migrate": "prisma migrate dev --schema prisma/schema.prisma",
+    "prisma:migrate": "node ../scripts/with-env.mjs prisma migrate deploy --schema prisma/schema.prisma",
     "prisma:seed": "prisma db seed --schema prisma/schema.prisma"
   },
   "prisma": {

@@ -1,3 +1,6 @@
+# Cloned workspace files created by a local API
+/data/
+
 # Logs
 logs
 *.log

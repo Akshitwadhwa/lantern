@@ -50,6 +50,9 @@ services:
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
       FALKORDB_HOST: falkordb
       FALKORDB_PORT: 6379
+      FISH_AUDIO_API_KEY: ${FISH_AUDIO_API_KEY:-}
+      FISH_AUDIO_VOICE_ID: ${FISH_AUDIO_VOICE_ID:-}
+      FISH_AUDIO_MODEL: ${FISH_AUDIO_MODEL:-s2.1-pro-free}
     ports:
       - '${SERVER_PORT:-4000}:${SERVER_PORT:-4000}'
     volumes:

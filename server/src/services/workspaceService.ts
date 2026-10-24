@@ -1,3 +1,4 @@
+import { mkdirSync } from 'node:fs';
 import { lstat, mkdir, rm } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
@@ -6,6 +7,10 @@ import { HttpError } from '../errors/httpError.js';
 
 export class WorkspaceService {
   private readonly rootDirectory = resolve(env.WORKSPACE_ROOT);
+
+  constructor() {
+    mkdirSync(this.rootDirectory, { recursive: true });
+  }
 
   getRoot(workspaceId: string): string {
     const workspaceRoot = resolve(this.rootDirectory, workspaceId);

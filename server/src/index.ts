@@ -12,6 +12,7 @@ import { HttpError } from './errors/httpError.js';
 import { authRateLimit } from './middleware/rateLimit.js';
 import { inviteRouter } from './routes/invites.js';
 import { brainRouter } from './routes/brain.js';
+import { speechRouter } from './routes/speech.js';
 import { chatRouter } from './routes/chat.js';
 import { gitRouter } from './routes/git.js';
 import { fileRouter } from './routes/files.js';
@@ -65,6 +66,7 @@ app.use('/api', workspaceRouter);
 app.use('/api', inviteRouter);
 app.use('/api', chatRouter);
 app.use('/api', brainRouter);
+app.use('/api', speechRouter);
 app.use('/api', gitRouter);
 app.use('/api', fileRouter);
 app.get('/api/me', async (request, response, next) => {

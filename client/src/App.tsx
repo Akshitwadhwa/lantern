@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 
 import { AuthProvider } from './auth/AuthContext';
 import { ProtectedRoute } from './auth/ProtectedRoute';
@@ -22,6 +22,29 @@ function WorkspaceLoadingScreen() {
       <p className="mt-3 text-slate-300">Loading the editor and collaboration tools.</p>
     </section>
   );
+}
+
+class WorkspaceErrorBoundary extends Component<{ children: ReactNode }, { message: string | null }> {
+  state = { message: null as string | null };
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      message: error instanceof Error ? error.message : 'The workspace could not be shown.',
+    };
+  }
+
+  render() {
+    if (this.state.message) {
+      return (
+        <section className="glass mx-auto mt-16 max-w-3xl rounded-3xl p-8">
+          <h1 className="font-display text-4xl text-slate-50">The workspace hit an error</h1>
+          <p className="mt-3 text-slate-300">{this.state.message}</p>
+        </section>
+      );
+    }
+
+    return this.props.children;
+  }
 }
 
 function AuthenticatedApp() {
@@ -54,15 +77,17 @@ function AuthenticatedApp() {
         {joinToken ? (
           <JoinWorkspace token={joinToken} />
         ) : workspaceId ? (
-          <Suspense
-            fallback={
-              <div className="px-6 py-16">
-                <WorkspaceLoadingScreen />
-              </div>
-            }
-          >
-            <WorkspaceExplorer workspaceId={workspaceId} />
-          </Suspense>
+          <WorkspaceErrorBoundary>
+            <Suspense
+              fallback={
+                <div className="px-6 py-16">
+                  <WorkspaceLoadingScreen />
+                </div>
+              }
+            >
+              <WorkspaceExplorer workspaceId={workspaceId} />
+            </Suspense>
+          </WorkspaceErrorBoundary>
         ) : (
           <Dashboard />
         )}

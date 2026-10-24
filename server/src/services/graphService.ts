@@ -77,11 +77,38 @@ const STOP_WORDS = new Set([
   'have',
   'has',
   'not',
+  'folder',
+  'folders',
+  'file',
+  'files',
+  'there',
+  'how',
+  'all',
+  'used',
+  'using',
+  'use',
+  'being',
 ]);
 
 const GRAPH_FRESH_MS = 20_000;
-const MAX_DOCUMENTS = 60;
+const GRAPH_VERSION = 2;
+const MAX_DOCUMENTS = 80;
+const MAX_ASSETS = 80;
 const MAX_COMMITS = 20;
+const ANSWER_CHAR_LIMIT = 1_600;
+
+const ASSET_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'svg',
+  'webp',
+  'ico',
+  'mp3',
+  'mp4',
+  'pdf',
+]);
 
 type GraphRow = Record<string, string>;
 
@@ -108,7 +135,22 @@ function getConnection(): Promise<FalkorDB> {
 
 function isUnavailable(error: unknown): boolean {
   const message = error instanceof Error ? error.message.toLowerCase() : '';
+  const code =
+    error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+      ? error.code.toLowerCase()
+      : '';
+  const nested =
+    error &&
+    typeof error === 'object' &&
+    'errors' in error &&
+    Array.isArray(error.errors)
+      ? error.errors.some((item) => isUnavailable(item))
+      : false;
+
   return (
+    nested ||
+    code === 'econnrefused' ||
+    code === 'econnreset' ||
     message.includes('econnrefused') ||
     message.includes('econnreset') ||
     message.includes('socket') ||
@@ -147,13 +189,20 @@ async function queryGraph(
 }
 
 function rowsFrom(result: { headers?: string[]; data?: unknown } | undefined): GraphRow[] {
-  if (!result?.headers || !Array.isArray(result.data)) {
+  if (!result || !Array.isArray(result.data)) {
     return [];
   }
 
   return result.data.map((row) => {
-    const values = Array.isArray(row) ? row : [];
     const record: GraphRow = {};
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      for (const [header, value] of Object.entries(row)) {
+        record[header] = value == null ? '' : String(value);
+      }
+      return record;
+    }
+
+    const values = Array.isArray(row) ? row : [];
     result.headers?.forEach((header, index) => {
       const value = values[index];
       record[header] = value == null ? '' : String(value);
@@ -179,19 +228,29 @@ function extensionOf(path: string): string {
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
 }
 
-function flattenFiles(nodes: FileTreeNode[], files: string[]): void {
+function flattenFiles(nodes: FileTreeNode[], textFiles: string[], assetFiles: string[]): void {
   for (const node of nodes) {
     if (node.kind === 'directory') {
       if (!SKIPPED_DIRECTORIES.has(node.name) && node.children) {
-        flattenFiles(node.children, files);
+        flattenFiles(node.children, textFiles, assetFiles);
       }
       continue;
     }
 
-    if (TEXT_EXTENSIONS.has(extensionOf(node.path))) {
-      files.push(node.path);
+    const extension = extensionOf(node.path);
+    if (TEXT_EXTENSIONS.has(extension)) {
+      textFiles.push(node.path);
+    } else if (ASSET_EXTENSIONS.has(extension)) {
+      assetFiles.push(node.path);
     }
   }
+}
+
+function searchTerms(terms: string[]): string[] {
+  const expanded = terms.flatMap((term) =>
+    term === 'assets' ? [term, 'assests'] : term === 'assests' ? [term, 'assets'] : [term],
+  );
+  return [...new Set(expanded)].slice(0, 10);
 }
 
 function clip(value: string, max: number): string {
@@ -200,15 +259,16 @@ function clip(value: string, max: number): string {
 }
 
 async function readDocuments(workspaceId: string) {
-  const files: string[] = [];
-  flattenFiles(await fileService.listTree(workspaceId), files);
+  const textFiles: string[] = [];
+  const assetFiles: string[] = [];
+  flattenFiles(await fileService.listTree(workspaceId), textFiles, assetFiles);
   const documents: Array<{ path: string; name: string; excerpt: string }> = [];
 
-  for (const path of files.slice(0, MAX_DOCUMENTS)) {
+  for (const path of textFiles.slice(0, MAX_DOCUMENTS)) {
     const name = path.split('/').pop() ?? path;
     try {
       const file = await fileService.readTextFile(workspaceId, path);
-      documents.push({ path, name, excerpt: clip(file.content, 500) });
+      documents.push({ path, name, excerpt: clip(file.content, 1_200) });
     } catch (error) {
       if (error instanceof HttpError) {
         documents.push({ path, name, excerpt: '' });
@@ -216,6 +276,16 @@ async function readDocuments(workspaceId: string) {
       }
       throw error;
     }
+  }
+
+  for (const path of assetFiles.slice(0, MAX_ASSETS)) {
+    const name = path.split('/').pop() ?? path;
+    const folder = path.split('/').slice(0, -1).join('/') || 'the project root';
+    documents.push({
+      path,
+      name,
+      excerpt: `${extensionOf(path).toUpperCase()} file in ${folder}.`,
+    });
   }
 
   return documents;
@@ -277,10 +347,15 @@ async function syncWorkspace(workspaceId: string): Promise<void> {
 
   try {
     const existing = await graph.roQuery(
-      'MATCH (project:Project {id: $workspaceId}) RETURN project.builtAt AS builtAt',
+      'MATCH (project:Project {id: $workspaceId}) RETURN project.builtAt AS builtAt, project.graphVersion AS graphVersion',
       { params: { workspaceId } },
     );
-    builtAt = Number(rowsFrom(existing)[0]?.builtAt ?? 0);
+    const row = rowsFrom(existing)[0];
+    builtAt = Number(row?.builtAt ?? 0);
+    const graphVersion = Number(row?.graphVersion ?? 0);
+    if (graphVersion !== GRAPH_VERSION) {
+      builtAt = 0;
+    }
   } catch (error) {
     if (error instanceof HttpError || isUnavailable(error)) {
       asGraphError(error);
@@ -321,13 +396,14 @@ async function syncWorkspace(workspaceId: string): Promise<void> {
   });
 
   await graph.query(
-    `CREATE (:Project {id: $workspaceId, name: $name, repo: $repo, builtAt: $builtAt})`,
+    `CREATE (:Project {id: $workspaceId, name: $name, repo: $repo, builtAt: $builtAt, graphVersion: $graphVersion})`,
     {
       params: {
         workspaceId,
         name: workspace.name,
         repo: workspace.repoFullName,
         builtAt: Date.now(),
+        graphVersion: GRAPH_VERSION,
       },
     },
   );
@@ -397,7 +473,7 @@ async function syncWorkspace(workspaceId: string): Promise<void> {
        MATCH (d:Decision {sha: decision.sha}), (person:Person)
        WHERE toLower(decision.authorName) CONTAINS toLower(person.username)
           OR toLower(person.username) CONTAINS toLower(decision.authorName)
-       CREATE (decision)-[:DECIDED_BY]->(person)`,
+       CREATE (d)-[:DECIDED_BY]->(person)`,
       {
         params: {
           decisions: decisions.map(({ sha, authorName }) => ({ sha, authorName })),
@@ -460,7 +536,7 @@ type SavedAnswer = {
 };
 
 function labelName(value: string | undefined): string {
-  const match = value?.match(/[A-Za-z]+/);
+  const match = value?.match(/[A-Za-z_]+/);
   return match?.[0] ?? '';
 }
 
@@ -537,7 +613,8 @@ async function restoreAnswers(graph: Graph, answers: SavedAnswer[]): Promise<voi
 }
 
 async function findSeeds(workspaceId: string, terms: string[]): Promise<Seed[]> {
-  if (terms.length === 0) return [];
+  const lookup = searchTerms(terms);
+  if (lookup.length === 0) return [];
   const queries: Array<{ cypher: string; label: string }> = [
     {
       label: 'Person',
@@ -553,7 +630,7 @@ async function findSeeds(workspaceId: string, terms: string[]): Promise<Seed[]> 
                WHERE toLower(document.path) CONTAINS term
                   OR toLower(document.name) CONTAINS term
                   OR toLower(document.excerpt) CONTAINS term
-               RETURN document.path AS key LIMIT 8`,
+               RETURN document.path AS key LIMIT 20`,
     },
     {
       label: 'Decision',
@@ -583,7 +660,7 @@ async function findSeeds(workspaceId: string, terms: string[]): Promise<Seed[]> 
   ];
   const seeds: Seed[] = [];
   for (const query of queries) {
-    const found = rowsFrom(await queryGraph(workspaceId, query.cypher, { terms }));
+    const found = rowsFrom(await queryGraph(workspaceId, query.cypher, { terms: lookup }));
     for (const row of found) {
       if (!row.key) continue;
       if (seeds.some((seed) => seed.label === query.label && seed.key === row.key)) continue;
@@ -763,30 +840,79 @@ async function chatAgent(
   }));
 }
 
+async function documentsMatching(
+  workspaceId: string,
+  terms: string[],
+  matchExcerpt: boolean,
+): Promise<Array<{ path: string; excerpt: string }>> {
+  if (terms.length === 0) return [];
+  const rows = rowsFrom(
+    await queryGraph(
+      workspaceId,
+      matchExcerpt
+        ? `UNWIND $terms AS term
+           MATCH (document:Document)-[:PART_OF]->(:Project {id: $workspaceId})
+           WHERE toLower(document.excerpt) CONTAINS term
+           RETURN DISTINCT document.path AS path, document.excerpt AS excerpt
+           LIMIT 40`
+        : `UNWIND $terms AS term
+           MATCH (document:Document)-[:PART_OF]->(:Project {id: $workspaceId})
+           WHERE toLower(document.path) CONTAINS term
+              OR toLower(document.name) CONTAINS term
+           RETURN DISTINCT document.path AS path, document.excerpt AS excerpt
+           LIMIT 40`,
+      { workspaceId, terms },
+    ),
+  );
+  return rows
+    .filter((row) => row.path)
+    .map((row) => ({ path: row.path ?? '', excerpt: row.excerpt ?? '' }));
+}
+
 async function fileAgent(
   workspaceId: string,
   seeds: Seed[],
   edges: Set<string>,
+  terms: string[],
 ): Promise<LinkedSource[]> {
   if (!edges.has('PART_OF')) return [];
-  const paths = seeds.filter((seed) => seed.label === 'Document').map((seed) => seed.key);
-  if (paths.length === 0) return [];
-  const rows = rowsFrom(
-    await queryGraph(
-      workspaceId,
-      `UNWIND $paths AS path
-       MATCH (document:Document {path: path})-[:PART_OF]->(:Project {id: $workspaceId})
-       RETURN document.path AS path, document.excerpt AS excerpt`,
-      { workspaceId, paths },
-    ),
-  );
-  return rows.map((document) => ({
+  const lookup = searchTerms(terms);
+  let matched = await documentsMatching(workspaceId, lookup, false);
+  if (matched.length === 0) {
+    matched = await documentsMatching(workspaceId, lookup, true);
+  }
+  const strict = matched.filter((document) => {
+    const name = document.path.split('/').pop() ?? '';
+    const stem = name.replace(/\.[^.]+$/, '').toLowerCase();
+    const segments = document.path.toLowerCase().split('/');
+    return lookup.some((term) => stem === term || segments.includes(term));
+  });
+  if (strict.length > 0) matched = strict;
+
+  if (matched.length === 0) {
+    const paths = seeds.filter((seed) => seed.label === 'Document').map((seed) => seed.key);
+    if (paths.length === 0) return [];
+    const rows = rowsFrom(
+      await queryGraph(
+        workspaceId,
+        `UNWIND $paths AS path
+         MATCH (document:Document {path: path})-[:PART_OF]->(:Project {id: $workspaceId})
+         RETURN document.path AS path, document.excerpt AS excerpt`,
+        { workspaceId, paths },
+      ),
+    );
+    matched = rows
+      .filter((row) => row.path)
+      .map((row) => ({ path: row.path ?? '', excerpt: row.excerpt ?? '' }));
+  }
+
+  return matched.map((document) => ({
     kind: 'file' as const,
-    title: document.path ?? 'File',
-    ...(document.path ? { path: document.path } : {}),
+    title: document.path,
+    path: document.path,
     excerpt: document.excerpt || 'File in this workspace.',
     linkLabel: 'Document',
-    linkKey: document.path ?? '',
+    linkKey: document.path,
   }));
 }
 
@@ -866,11 +992,273 @@ function answerText(sources: BrainSource[]): string {
   return sources.map((source) => `${source.title}: ${source.excerpt}`).join('\n\n');
 }
 
+function joinList(items: string[]): string {
+  const unique = [...new Set(items.filter(Boolean))];
+  if (unique.length === 0) return '';
+  if (unique.length === 1) return unique[0] ?? '';
+  if (unique.length === 2) return `${unique[0]} and ${unique[1]}`;
+  return `${unique.slice(0, -1).join(', ')}, and ${unique[unique.length - 1]}`;
+}
+
+function arrayBlock(content: string, name: string): string {
+  const marker = `export const ${name}`;
+  const start = content.indexOf(marker);
+  if (start < 0) return '';
+  const equals = content.indexOf('=', start);
+  const open = content.indexOf('[', equals);
+  if (open < 0) return '';
+  let depth = 0;
+  for (let index = open; index < content.length; index += 1) {
+    if (content[index] === '[') depth += 1;
+    if (content[index] === ']') {
+      depth -= 1;
+      if (depth === 0) return content.slice(open, index + 1);
+    }
+  }
+  return '';
+}
+
+function quoted(block: string, field: string): string[] {
+  return [...block.matchAll(new RegExp(`${field}:\\s*(["'])([\\s\\S]*?)\\1`, 'g'))].map(
+    (match) => match[2] ?? '',
+  );
+}
+
+function lineValue(line: string, field: string): string {
+  return line.match(new RegExp(`${field}:\\s*(["'])([\\s\\S]*?)\\1`))?.[2] ?? '';
+}
+
+function explainModule(path: string, content: string): string {
+  const experiences = arrayBlock(content, 'experiences');
+  const projects = arrayBlock(content, 'projects');
+  const certificates = arrayBlock(content, 'certificates');
+  const roles = [...experiences.matchAll(/role:\s*["']([^"']+)["'][\s\S]*?company:\s*["']([^"']+)["']/g)];
+  const projectTitles = quoted(projects, 'title');
+  const certificateTitles = quoted(certificates, 'title');
+  const sentences = [`${path} holds the portfolio content.`];
+
+  if (roles.length > 0) {
+    sentences.push(
+      `Jobs: ${joinList(roles.map((match) => `${match[1]} at ${match[2]}`))}.`,
+    );
+  }
+  if (projectTitles.length > 0) sentences.push(`Projects: ${joinList(projectTitles)}.`);
+  if (certificateTitles.length > 0) sentences.push(`Certificates: ${joinList(certificateTitles)}.`);
+  if (content.includes('./Assests/')) sentences.push('Images are imported from the Assests folder.');
+
+  return sentences.join(' ');
+}
+
+function explainGenericFile(path: string, content: string): string {
+  const exports = [
+    ...content.matchAll(/export (?:default )?(?:async )?(?:function|const|class|type|interface) (\w+)/g),
+  ].map((match) => match[1] ?? '');
+  const localImports = [...content.matchAll(/from ['"](\.[^'"]+)['"]/g)].map(
+    (match) => match[1] ?? '',
+  );
+  const sentences = [`${path}.`];
+  if (exports.length > 0) sentences.push(`Exports ${joinList(exports.slice(0, 6))}.`);
+  if (localImports.length > 0) {
+    sentences.push(`Imports ${joinList(localImports.slice(0, 5))}.`);
+  }
+  return sentences.join(' ');
+}
+
+function matchingFolders(terms: string[], paths: string[]): string[] {
+  const folders = new Set<string>();
+  for (const path of paths) {
+    const parts = path.split('/');
+    parts.pop();
+    let current = '';
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      const lowered = part.toLowerCase();
+      if (terms.some((term) => lowered.includes(term) || term.includes(lowered))) {
+        folders.add(current);
+      }
+    }
+  }
+  return [...folders].filter(
+    (folder) => ![...folders].some((other) => other !== folder && folder.startsWith(`${other}/`)),
+  );
+}
+
+function usageOf(assetName: string, contents: Map<string, string>): string[] {
+  const notes: string[] = [];
+  for (const [path, content] of contents) {
+    if (path.endsWith(assetName)) continue;
+    const lines = content.split('\n');
+    const importIndex = lines.findIndex(
+      (line) => line.includes(assetName) && line.includes('import'),
+    );
+    if (importIndex < 0) {
+      const mention = lines.find((line) => line.includes(assetName));
+      if (mention) notes.push(`${path} mentions it: ${mention.trim()}.`);
+      continue;
+    }
+    const variable = lines[importIndex]?.match(/import\s+(\w+)/)?.[1];
+    if (!variable) {
+      notes.push(`${path} imports ${assetName}.`);
+      continue;
+    }
+    const uses = lines.flatMap((line, index) =>
+      index !== importIndex && new RegExp(`\\b${variable}\\b`).test(line) ? [{ line, index }] : [],
+    );
+    if (uses.length === 0) {
+      notes.push(`${path} imports it as ${variable}.`);
+      continue;
+    }
+    const described = uses.map(({ line, index }) => {
+      let title = '';
+      let role = '';
+      let company = '';
+      for (let cursor = index; cursor >= Math.max(0, index - 30); cursor -= 1) {
+        const current = lines[cursor] ?? '';
+        title ||= lineValue(current, 'title');
+        role ||= lineValue(current, 'role');
+        company ||= lineValue(current, 'company');
+        if (title || (role && company)) break;
+      }
+      const field = line.match(/(\w+)\s*:/)?.[1];
+      const subject = title || (role && company ? `${role} at ${company}` : '');
+      const file = path.split('/').pop()?.replace(/\.[^.]+$/, '') || path;
+      if (line.includes('src={') || line.includes('<img')) return file;
+      if (subject) return subject;
+      return file;
+    });
+    notes.push(joinList(described));
+  }
+  return notes;
+}
+
+async function readWorkspaceText(workspaceId: string): Promise<Map<string, string>> {
+  const rows = rowsFrom(
+    await queryGraph(
+      workspaceId,
+      `MATCH (document:Document)-[:PART_OF]->(:Project {id: $workspaceId})
+       RETURN document.path AS path
+       LIMIT 120`,
+      { workspaceId },
+    ),
+  );
+  const contents = new Map<string, string>();
+  for (const row of rows) {
+    const path = row.path ?? '';
+    if (!path || !TEXT_EXTENSIONS.has(extensionOf(path))) continue;
+    try {
+      contents.set(path, (await fileService.readTextFile(workspaceId, path)).content);
+    } catch (error) {
+      if (error instanceof HttpError) continue;
+      throw error;
+    }
+  }
+  return contents;
+}
+
+function explainFolder(
+  folder: string,
+  paths: string[],
+  contents: Map<string, string>,
+): string {
+  const inside = paths
+    .filter((path) => path === folder || path.startsWith(`${folder}/`))
+    .sort();
+  const groups = new Map<string, string[]>();
+  for (const path of inside) {
+    const relative = path.slice(folder.length).replace(/^\//, '');
+    const group = relative.includes('/') ? (relative.split('/')[0] ?? 'files') : 'files';
+    const name = path.split('/').pop() ?? path;
+    const current = groups.get(group) ?? [];
+    current.push(name);
+    groups.set(group, current);
+  }
+
+  const imageCount = inside.filter((path) => ASSET_EXTENSIONS.has(extensionOf(path))).length;
+  const allImages = imageCount === inside.length && inside.length > 0;
+  if (!allImages) {
+    const named = [...groups.entries()].map(([group, names]) => {
+      const stems = names.map((name) => name.replace(/\.[^.]+$/, ''));
+      const where = group === 'files' ? 'alongside those' : `in ${group}`;
+      return group === 'files'
+        ? joinList(stems)
+        : `${joinList(stems)} ${where}`;
+    });
+    return `The ${folder} folder has ${inside.length} files: ${named.join(', and ')}.`;
+  }
+
+  const sentences = [
+    `The ${folder} folder has ${inside.length} image${inside.length === 1 ? '' : 's'}.`,
+  ];
+  for (const [group, names] of groups) {
+    names.forEach((name, index) => {
+      const notes = usageOf(name, contents);
+      const place = group === 'files' ? '' : `In ${group}, `;
+      const lead = index === 0 ? place : '';
+      if (notes.length === 0) {
+        sentences.push(`${lead}${name} is stored here and no source file imports it.`);
+        return;
+      }
+      const screenFiles = new Set(
+        [...contents.keys()].map((path) => path.split('/').pop()?.replace(/\.[^.]+$/, '') ?? ''),
+      );
+      const shownOnScreen = notes.every((note) => screenFiles.has(note));
+      const usedAsLogo = notes.every((note) => note.includes(' at '));
+      const use = shownOnScreen
+        ? `is the image shown in ${joinList(notes)}`
+        : usedAsLogo
+          ? `is the logo for ${joinList(notes)}`
+          : `is the image for ${joinList(notes.map((note) => (note.split(/\s+/).length >= 3 ? `the ${note}` : note)))}`;
+      sentences.push(`${lead}${name} ${use}.`);
+    });
+  }
+  return sentences.join(' ');
+}
+
+async function composeLongAnswer(
+  workspaceId: string,
+  question: string,
+  sources: LinkedSource[],
+): Promise<string> {
+  const files = sources.filter((source) => source.kind === 'file' && source.path);
+  const paths = files.map((source) => source.path ?? '');
+  const contents = paths.length > 0 ? await readWorkspaceText(workspaceId) : new Map<string, string>();
+  const sections: string[] = [];
+  const folders = matchingFolders(searchTerms(termsFromQuestion(question)), paths);
+  const covered = new Set<string>();
+
+  for (const folder of folders) {
+    sections.push(explainFolder(folder, paths, contents));
+    for (const path of paths) {
+      if (path === folder || path.startsWith(`${folder}/`)) covered.add(path);
+    }
+  }
+
+  for (const path of paths) {
+    if (covered.has(path) || ASSET_EXTENSIONS.has(extensionOf(path))) continue;
+    const content = contents.get(path);
+    if (!content) continue;
+    const rich = content.includes('export const experiences') || content.includes('export const projects');
+    sections.push(rich ? explainModule(path, content) : explainGenericFile(path, content));
+  }
+
+  const other = sources
+    .filter((source) => source.kind !== 'file')
+    .map((source) => `${source.title}: ${source.excerpt}`);
+  if (other.length > 0) sections.push(other.join('\n\n'));
+  if (sections.length === 0) return answerText(sources);
+
+  const text = sections.join('\n\n');
+  if (text.length <= ANSWER_CHAR_LIMIT) return text;
+  const cut = text.slice(0, ANSWER_CHAR_LIMIT);
+  const breakAt = cut.lastIndexOf('. ');
+  return (breakAt > 200 ? cut.slice(0, breakAt + 1) : cut).trim();
+}
+
 async function writeAnswer(
   workspaceId: string,
   question: string,
   sources: LinkedSource[],
-): Promise<BrainAnswer['sources']> {
+): Promise<{ text: string; sources: BrainAnswer['sources'] }> {
   const answerId = `ans_${Date.now()}`;
   await queryGraph(
     workspaceId,
@@ -891,18 +1279,21 @@ async function writeAnswer(
       key: source.linkKey,
     });
   }
-  const linked = (await sourcesFromAnswer(workspaceId, answerId)).slice(0, 5);
-  const text = answerText(linked);
+  const linked = await sourcesFromAnswer(workspaceId, answerId);
+  const text = await composeLongAnswer(workspaceId, question, linked);
   await queryGraph(workspaceId, `MATCH (answer:Answer {id: $answerId}) SET answer.text = $text`, {
     answerId,
     text,
   });
-  return linked.map((source) => ({
-    kind: source.kind,
-    title: source.title,
-    excerpt: source.excerpt,
-    ...(source.path ? { path: source.path } : {}),
-  }));
+  return {
+    text,
+    sources: linked.slice(0, 12).map((source) => ({
+      kind: source.kind,
+      title: source.title,
+      excerpt: clip(source.excerpt, 220),
+      ...(source.path ? { path: source.path } : {}),
+    })),
+  };
 }
 
 export class GraphService {
@@ -930,9 +1321,9 @@ export class GraphService {
       if (previous) {
         trace.push('Context agent opened the previous Answer');
         const recalled = (await sourcesFromAnswer(workspaceId, previous.key)).slice(0, 5);
-        const sources = await writeAnswer(workspaceId, question, recalled);
+        const written = await writeAnswer(workspaceId, question, recalled);
         trace.push('Action agent read BASED_ON and wrote Answer');
-        return { answer: answerText(sources), sources, trace };
+        return { answer: written.text, sources: written.sources, trace };
       }
     }
 
@@ -961,7 +1352,7 @@ export class GraphService {
     }
     if (edges.has('PART_OF')) {
       trace.push('File agent, because PART_OF');
-      found.push(...(await fileAgent(workspaceId, seeds, edges)));
+      found.push(...(await fileAgent(workspaceId, seeds, edges, terms)));
     }
 
     const unique = found
@@ -969,10 +1360,10 @@ export class GraphService {
         (source, index) =>
           found.findIndex((candidate) => sourceKey(candidate) === sourceKey(source)) === index,
       )
-      .slice(0, 5);
-    const sources = await writeAnswer(workspaceId, question, unique);
+      .slice(0, 24);
+    const written = await writeAnswer(workspaceId, question, unique);
     trace.push('Action agent wrote Answer');
-    return { answer: answerText(sources), sources, trace };
+    return { answer: written.text, sources: written.sources, trace };
   }
 }
 

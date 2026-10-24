@@ -82,6 +82,13 @@ export const chatHistoryRateLimit = createRateLimit({
   key: authenticatedRequestKey,
 });
 
+export const speechRateLimit = createRateLimit({
+  windowMs: 60 * 1_000,
+  maxRequests: 8,
+  message: 'Too many voice requests. Please wait a minute and try again.',
+  key: authenticatedRequestKey,
+});
+
 export const brainRateLimit = createRateLimit({
   windowMs: 60 * 1_000,
   maxRequests: 20,

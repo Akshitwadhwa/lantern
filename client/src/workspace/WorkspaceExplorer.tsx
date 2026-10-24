@@ -6,6 +6,7 @@ import { MonacoBinding } from 'y-monaco';
 import { WebsocketProvider } from 'y-websocket';
 import * as Y from 'yjs';
 
+import { useAuth } from '../auth/AuthContext';
 import { WorkspaceBrain } from './WorkspaceBrain';
 
 loader.config({ monaco });
@@ -804,10 +805,10 @@ export function WorkspaceExplorer({ workspaceId }: { workspaceId: string }) {
 
   return (
     <main
-      className="h-screen overflow-hidden bg-[#342b22] text-slate-100"
+      className="flex h-screen min-h-0 flex-col overflow-hidden bg-[#342b22] text-slate-100"
       onClick={() => setContextMenu(null)}
     >
-      <section className="flex h-full min-w-0 flex-col">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex h-9 shrink-0 items-center border-b border-[#2a231c] bg-[#4e4338] px-3 text-xs text-[#fff4df]">
           <div className="flex min-w-0 items-center gap-4">
             <span
@@ -899,11 +900,11 @@ export function WorkspaceExplorer({ workspaceId }: { workspaceId: string }) {
           </p>
         ) : null}
         {isLoading ? (
-          <p className="m-auto text-sm text-slate-400">Loading workspace files…</p>
+          <p className="px-6 py-10 text-sm text-slate-400">Loading workspace files…</p>
         ) : null}
 
         {!isLoading && workspace?.status !== 'READY' ? (
-          <p className="mt-10 rounded-lg border border-slate-700 bg-slate-900 p-6 text-slate-300">
+          <p className="m-6 rounded-lg border border-slate-700 bg-slate-900 p-6 text-slate-300">
             This workspace is not ready yet. Return to the dashboard and wait for cloning to finish.
           </p>
         ) : null}

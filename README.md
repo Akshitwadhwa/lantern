@@ -6,7 +6,7 @@ PostgreSQL stores accounts, workspaces, and invites. FalkorDB is the graph the b
 
 ## Setup
 
-You need Docker Desktop. Node.js 22 or newer is only needed if you want to run lint and build on the host.
+`npm run dev` starts the React app only. Open `http://localhost:5173`. Sign-in, the editor, and the brain stay in the API, which this command does not start.
 
 1. Copy the environment file:
 
@@ -14,16 +14,18 @@ You need Docker Desktop. Node.js 22 or newer is only needed if you want to run l
    cp .env.example .env
    ```
 
-2. Fill these values in `.env`. Leave the other keys as they are for a local Docker run.
+2. Fill these values in `.env`.
 
    | Name                        | Value                                                                                                    |
    | --------------------------- | -------------------------------------------------------------------------------------------------------- |
-   | `POSTGRES_PASSWORD`         | A local password. Use the same password inside `DATABASE_URL`.                                           |
+   | `POSTGRES_PASSWORD`         | The password of your local PostgreSQL user. Use the same password inside `DATABASE_URL`.                 |
    | `GITHUB_CLIENT_ID`          | From a GitHub OAuth app.                                                                                 |
    | `GITHUB_CLIENT_SECRET`      | Secret from that same app.                                                                               |
    | `GITHUB_OAUTH_REDIRECT_URL` | `http://localhost:4000/auth/github/callback`                                                             |
    | `JWT_SECRET`                | `openssl rand -base64 32`                                                                                |
    | `TOKEN_ENCRYPTION_KEY`      | Run that command again. It must differ from `JWT_SECRET`. Both values are Base64 and decode to 32 bytes. |
+
+   `DATABASE_URL` stays on `localhost:5432`. Create the `together` database if it does not exist yet. `WORKSPACE_ROOT=../data/workspaces` stores cloned repos in this project.
 
 3. Create a GitHub OAuth app with scopes `read:user`, `user:email`, and `repo`.
 
@@ -34,31 +36,26 @@ You need Docker Desktop. Node.js 22 or newer is only needed if you want to run l
 
    `CORS_ORIGIN` in `.env` stays `http://localhost:5173`. The callback URL in GitHub and `GITHUB_OAUTH_REDIRECT_URL` must match exactly.
 
-4. Start the stack:
+4. Install dependencies and start the React app:
 
    ```bash
-   docker compose up --build
+   npm install
+   npm run dev
    ```
 
-   Open `http://localhost:5173`. Compose starts the client, the API, PostgreSQL, and FalkorDB. The browser talks only to the client. The client proxies `/api`, `/auth`, and the collaboration sockets to the API.
-
-5. Stop the containers and keep the database and workspace files:
-
-   ```bash
-   docker compose down
-   ```
+   Open `http://localhost:5173`. Stop it with Ctrl+C.
 
 Do not commit `.env`. It holds the database password, the GitHub client secret, and the two encryption keys.
 
-Inside Compose, the API reaches FalkorDB at the hostname `falkordb` and PostgreSQL at `postgres`. The `localhost` values in `.env` are for commands you run on your machine.
-
-For a public HTTPS tunnel, set the GitHub homepage, the callback URL, `CORS_ORIGIN`, and `GITHUB_OAUTH_REDIRECT_URL` to that exact origin, and add the tunnel hostname to `VITE_ALLOWED_HOSTS`. Recreate the client container after changing that list. Sign in again after the callback URL changes.
+For a public HTTPS tunnel, set the GitHub homepage, the callback URL, `CORS_ORIGIN`, and `GITHUB_OAUTH_REDIRECT_URL` to that exact origin, and add the tunnel hostname to `VITE_ALLOWED_HOSTS`. Restart `npm run dev` after changing those values, then sign in again.
 
 ## Use the workspace
 
 Sign in with GitHub, create a workspace from a repository, and invite a teammate. Everyone in the workspace can open files, edit them at the same time, and use chat.
 
-Open the brain from the header and ask in plain language. Useful starts are “Who owns this workspace?”, “Where is the README?”, and “What did the team say in chat?”. A follow-up such as “What did we just find?” walks the previous answer. File sources open in the editor. The gold trace lists which agent ran and which relationship allowed it.
+Open the brain from the header and ask in plain language, or choose Dictate and speak the question. Useful starts are “Who owns this workspace?”, “Where is the README?”, and “What did the team say in chat?”. A follow-up such as “What did we just find?” walks the previous answer. File sources open in the editor. The gold trace lists which agent ran and which relationship allowed it.
+
+Hear it sends that answer to Fish Audio and plays the audio. A dictated question is spoken back on its own. Set `FISH_AUDIO_API_KEY` for this. `FISH_AUDIO_VOICE_ID` is a voice id from the Fish library, and the Voice field in the panel overrides it for one answer. The default model is `s2.1-pro-free`. Without a key, the brain still answers on screen and voice returns a clear error.
 
 Source Control can show status, commit every change in the server workspace, pull, and, for the owner, push the current branch. The GitHub token stays encrypted on the server. If a push says authentication failed, sign out and sign in again.
 
@@ -127,7 +124,7 @@ npm run format:check
 ## Troubleshooting
 
 - **GitHub sends you back with an error.** The callback URL on the OAuth app must be exactly `GITHUB_OAUTH_REDIRECT_URL`.
-- **The landing page says the API is offline.** The client is up and the API container is not. Run `docker compose up --build` and wait until the API is listening.
-- **The brain says FalkorDB is not running.** The `falkordb` service has to be healthy. Compose starts it with the rest of the stack. There is no keyword fallback when the graph is down.
-- **A public tunnel is blocked.** Add only that hostname to `VITE_ALLOWED_HOSTS`, then recreate the client container.
+- **The landing page says the API is offline.** The React app is running and the API is not. `npm run dev` does not start the API.
+- **The brain says FalkorDB is not running.** FalkorDB has to be listening on `localhost:6379`. There is no keyword fallback when the graph is down.
+- **A public tunnel is blocked.** Add only that hostname to `VITE_ALLOWED_HOSTS`, then restart `npm run dev`.
 - **Push says authentication failed.** Sign out and sign in with GitHub again. Do not paste a token into the app.
